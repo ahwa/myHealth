@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE HealthData>
+<HealthData locale="en_US">
+  <Record type="HKQuantityTypeIdentifierRestingHeartRate" sourceName="Apple Watch" unit="count/min" creationDate="2026-04-28 08:00:00 -0700" startDate="2026-04-28 08:00:00 -0700" endDate="2026-04-28 08:00:00 -0700" value="58"/>
+  <Record type="HKQuantityTypeIdentifierRestingHeartRate" sourceName="Apple Watch" unit="count/min" creationDate="2026-05-01 08:00:00 -0700" startDate="2026-05-01 08:00:00 -0700" endDate="2026-05-01 08:00:00 -0700" value="55"/>
+  <Record type="HKQuantityTypeIdentifierHeartRateVariabilitySDNN" sourceName="Apple Watch" unit="ms" creationDate="2026-04-28 08:00:00 -0700" startDate="2026-04-28 08:00:00 -0700" endDate="2026-04-28 08:00:00 -0700" value="48"/>
+  <Record type="HKQuantityTypeIdentifierHeartRateVariabilitySDNN" sourceName="Apple Watch" unit="ms" creationDate="2026-05-01 08:00:00 -0700" startDate="2026-05-01 08:00:00 -0700" endDate="2026-05-01 08:00:00 -0700" value="54"/>
+  <Record type="HKCategoryTypeIdentifierSleepAnalysis" sourceName="Apple Watch" creationDate="2026-05-01 07:00:00 -0700" startDate="2026-04-30 23:00:00 -0700" endDate="2026-05-01 06:30:00 -0700" value="HKCategoryValueSleepAnalysisAsleepCore"/>
+  <Workout workoutActivityType="HKWorkoutActivityTypeTraditionalStrengthTraining" duration="45" durationUnit="min" sourceName="Apple Watch" startDate="2026-05-01 18:00:00 -0700" endDate="2026-05-01 18:45:00 -0700" totalEnergyBurned="260" totalEnergyBurnedUnit="kcal"/>
+  <Workout workoutActivityType="HKWorkoutActivityTypeFunctionalStrengthTraining" duration="40" durationUnit="min" sourceName="Apple Watch" startDate="2026-05-03 10:00:00 -0700" endDate="2026-05-03 10:40:00 -0700" totalEnergyBurned="240" totalEnergyBurnedUnit="kcal"/>
+</HealthData>
+

@@ -1,0 +1,15 @@
+.DS_Store
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+
+# Local health data and generated outputs
+export.zip
+*.sqlite
+*.sqlite3
+reports/
+
