@@ -19,7 +19,7 @@ from .config import APP_DIR
 CODEX_CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann"
 CODEX_AUTHORIZE_URL = "https://auth.openai.com/oauth/authorize"
 CODEX_TOKEN_URL = "https://auth.openai.com/oauth/token"
-CODEX_REDIRECT_URI = "http://127.0.0.1:1455/auth/callback"
+CODEX_REDIRECT_HOST = "localhost"
 CODEX_SCOPE = "openid profile email offline_access"
 AUTH_PATH = APP_DIR / "auth.json"
 
@@ -131,6 +131,7 @@ class _CallbackHandler(BaseHTTPRequestHandler):
         self.server.auth_code = params.get("code", [None])[0]
         self.server.auth_state = params.get("state", [None])[0]
         self.server.auth_error = params.get("error", [None])[0]
+        self.server.auth_error_description = params.get("error_description", [None])[0]
         self.send_response(200)
         self.send_header("Content-Type", "text/plain")
         self.end_headers()
@@ -144,6 +145,7 @@ class _CallbackServer(HTTPServer):
     auth_code: str | None = None
     auth_state: str | None = None
     auth_error: str | None = None
+    auth_error_description: str | None = None
 
 
 def _check_state(received: str | None, expected: str) -> None:
@@ -151,11 +153,11 @@ def _check_state(received: str | None, expected: str) -> None:
         raise RuntimeError("OAuth state did not match; refusing token exchange.")
 
 
-def _authorization_url(code_challenge: str, state: str) -> str:
+def _authorization_url(code_challenge: str, state: str, redirect_uri: str) -> str:
     params = {
         "response_type": "code",
         "client_id": CODEX_CLIENT_ID,
-        "redirect_uri": CODEX_REDIRECT_URI,
+        "redirect_uri": redirect_uri,
         "scope": CODEX_SCOPE,
         "code_challenge": code_challenge,
         "code_challenge_method": "S256",
@@ -181,31 +183,44 @@ def login_openai_codex(timeout_seconds: int = 180, manual: bool = False) -> Code
     verifier = _b64url(secrets.token_bytes(48))
     challenge = _b64url(hashlib.sha256(verifier.encode("ascii")).digest())
     state = secrets.token_urlsafe(24)
-    auth_url = _authorization_url(challenge, state)
 
-    webbrowser.open(auth_url)
     auth_code: str | None = None
     auth_state: str | None = None
+    redirect_uri: str | None = None
+
     if not manual:
         try:
-            server = _CallbackServer(("127.0.0.1", 1455), _CallbackHandler)
+            # Bind to port 0 so the OS picks a free port, matching the Codex CLI behaviour.
+            server = _CallbackServer(("127.0.0.1", 0), _CallbackHandler)
+            port = server.server_address[1]
+            redirect_uri = f"http://{CODEX_REDIRECT_HOST}:{port}/auth/callback"
+            auth_url = _authorization_url(challenge, state, redirect_uri)
+            webbrowser.open(auth_url)
             server.timeout = 1
             deadline = time.time() + timeout_seconds
             while time.time() < deadline and not server.auth_code and not server.auth_error:
                 server.handle_request()
             server.server_close()
             if server.auth_error:
-                raise RuntimeError(f"OAuth failed: {server.auth_error}")
+                desc = server.auth_error_description
+                msg = f"OAuth failed: {server.auth_error}"
+                if desc:
+                    msg += f" — {desc}"
+                raise RuntimeError(msg)
             auth_code = server.auth_code
             auth_state = server.auth_state
         except OSError:
             print(
-                "Warning: could not start local callback server (port busy?); "
+                "Warning: could not start local callback server; "
                 "falling back to manual mode."
             )
             auth_code = None
 
     if not auth_code:
+        if redirect_uri is None:
+            redirect_uri = f"http://{CODEX_REDIRECT_HOST}:1455/auth/callback"
+            auth_url = _authorization_url(challenge, state, redirect_uri)
+            webbrowser.open(auth_url)
         print("Open this URL if your browser did not open:")
         print(auth_url)
         pasted = input("Paste the final redirect URL or authorization code: ")
@@ -219,7 +234,7 @@ def login_openai_codex(timeout_seconds: int = 180, manual: bool = False) -> Code
             "grant_type": "authorization_code",
             "client_id": CODEX_CLIENT_ID,
             "code": auth_code,
-            "redirect_uri": CODEX_REDIRECT_URI,
+            "redirect_uri": redirect_uri,
             "code_verifier": verifier,
         },
     )

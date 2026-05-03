@@ -2,7 +2,7 @@ from pathlib import Path
 
 from myhealth.analytics import parse_period, summarize
 from myhealth.ai import build_analysis_prompt
-from myhealth.auth import CODEX_CLIENT_ID, _authorization_url, _code_from_pasted_value
+from myhealth.auth import CODEX_CLIENT_ID, CODEX_REDIRECT_HOST, _authorization_url, _code_from_pasted_value
 from myhealth.apple_health import parse_export
 from myhealth.models import PlanningStyle
 from myhealth.storage import connect, insert_items
@@ -43,12 +43,20 @@ def test_ai_prompt_uses_summary_not_raw_records():
 
 
 def test_codex_oauth_authorization_url_uses_pkce():
-    url = _authorization_url("challenge", "state")
+    url = _authorization_url("challenge", "state", "http://localhost:9999/auth/callback")
 
     assert "auth.openai.com/oauth/authorize" in url
     assert f"client_id={CODEX_CLIENT_ID}" in url
     assert "code_challenge=challenge" in url
     assert "code_challenge_method=S256" in url
+
+
+def test_codex_oauth_redirect_uri_uses_localhost():
+    """redirect_uri must use localhost (not 127.0.0.1) to match OpenAI's registered app."""
+    assert CODEX_REDIRECT_HOST == "localhost"
+    url = _authorization_url("challenge", "state", f"http://{CODEX_REDIRECT_HOST}:9999/auth/callback")
+    assert "localhost" in url
+    assert "127.0.0.1" not in url
 
 
 def test_codex_oauth_pasted_redirect_parsing():
