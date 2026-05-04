@@ -4,6 +4,7 @@ import base64
 import hashlib
 import json
 import secrets
+import sys
 import time
 import urllib.error
 import urllib.parse
@@ -209,17 +210,30 @@ def login_openai_codex(timeout_seconds: int = 180, manual: bool = False) -> Code
                 raise RuntimeError(msg)
             auth_code = server.auth_code
             auth_state = server.auth_state
-        except OSError:
+        except OSError as exc:
             print(
-                "Warning: could not start local callback server; "
-                "falling back to manual mode."
+                "Warning: could not start local callback server "
+                f"({exc.__class__.__name__}: {exc}); falling back to manual mode.",
+                file=sys.stderr,
             )
             auth_code = None
+            # Force the manual branch below to set up a fresh redirect URI,
+            # since the local listener is no longer bound.
+            redirect_uri = None
 
     if not auth_code:
         if redirect_uri is None:
             redirect_uri = f"http://{CODEX_REDIRECT_HOST}:1455/auth/callback"
             auth_url = _authorization_url(challenge, state, redirect_uri)
+            print(
+                "\nManual OAuth mode: after you sign in, your browser will show\n"
+                f"  'This site can't be reached' at {CODEX_REDIRECT_HOST}:1455\n"
+                "That is EXPECTED — no local server is running on that port.\n"
+                "Copy the FULL URL from your browser's address bar (it contains\n"
+                "'code=...' and 'state=...' query parameters) and paste it at the\n"
+                "prompt below. Alternatively, paste just the value of the 'code' param.\n",
+                file=sys.stderr,
+            )
             webbrowser.open(auth_url)
         print("Open this URL if your browser did not open:")
         print(auth_url)
