@@ -41,6 +41,8 @@ Common commands:
 
 ```bash
 myhealth import export.zip                  # one-time: load Apple Health export
+myhealth inspect                            # offline inventory of imported data
+myhealth trends --period 30d                # offline terminal trends, no AI call
 myhealth report                              # 30d window, 7-day plan, OAuth
 myhealth plan --days 14 --style aggressive   # custom plan length and style
 myhealth plan --model gpt-5.5                # override the Codex model if needed
@@ -58,3 +60,5 @@ The app reads Apple Health export files and stores a SQLite cache locally in:
 AI analysis sends a compact metrics summary to the configured model provider, not the raw Apple Health export XML.
 
 Reports are written to `./reports/` by default.
+
+`inspect` and `trends` read only the local SQLite cache and do not call any AI provider.

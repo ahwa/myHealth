@@ -17,6 +17,15 @@ def _fmt(value: float | None, suffix: str = "") -> str:
     return "n/a" if value is None else f"{value:.1f}{suffix}"
 
 
+def _fmt_iso_date(value: str | None) -> str:
+    if not value:
+        return "n/a"
+    try:
+        return datetime.fromisoformat(value).astimezone().isoformat(timespec="seconds")
+    except ValueError:
+        return value
+
+
 def _delta_arrow(delta: float | None, lower_is_better: bool = False) -> str:
     if delta is None:
         return ""
@@ -27,6 +36,15 @@ def _delta_arrow(delta: float | None, lower_is_better: bool = False) -> str:
     good = (not up) if lower_is_better else up
     color = "var(--good)" if good else "var(--bad)"
     return f'<span style="color:{color}">{arrow} {delta:+.2f}</span>'
+
+
+def _delta_text(delta: float | None) -> str:
+    if delta is None:
+        return "n/a"
+    if delta == 0:
+        return "-> 0"
+    arrow = "up" if delta > 0 else "down"
+    return f"{arrow} {delta:+.2f}"
 
 
 def print_ai_analysis(summary: MetricSummary, analysis: AIHealthAnalysis) -> None:
@@ -58,6 +76,123 @@ def print_ai_analysis(summary: MetricSummary, analysis: AIHealthAnalysis) -> Non
         console.print("\n[bold]Cautions[/bold]")
         for caution in analysis.cautions:
             console.print(f"- {caution}")
+
+
+def print_inspection(inventory: dict) -> None:
+    console = Console()
+    overview = Table(title="myHealth import inventory")
+    overview.add_column("Item")
+    overview.add_column("Value")
+    overview.add_row("Records", str(inventory["records"]))
+    overview.add_row("Workouts", str(inventory["workouts"]))
+    overview.add_row("First data", _fmt_iso_date(inventory.get("first_date")))
+    overview.add_row("Latest data", _fmt_iso_date(inventory.get("latest_date")))
+    console.print(overview)
+
+    record_table = Table(title="Top health record types")
+    record_table.add_column("Type")
+    record_table.add_column("Count", justify="right")
+    for item in inventory["record_types"]:
+        record_table.add_row(item["type"], str(item["count"]))
+    if not inventory["record_types"]:
+        record_table.add_row("No health records found", "0")
+    console.print(record_table)
+
+    workout_table = Table(title="Top workout types")
+    workout_table.add_column("Type")
+    workout_table.add_column("Count", justify="right")
+    for item in inventory["workout_types"]:
+        workout_table.add_row(item["type"], str(item["count"]))
+    if not inventory["workout_types"]:
+        workout_table.add_row("No workouts found", "0")
+    console.print(workout_table)
+
+    source_table = Table(title="Top sources")
+    source_table.add_column("Source")
+    source_table.add_column("Kind")
+    source_table.add_column("Count", justify="right")
+    for item in inventory["sources"]:
+        source_table.add_row(item["source"], item["kind"], str(item["count"]))
+    if not inventory["sources"]:
+        source_table.add_row("No sources found", "-", "0")
+    console.print(source_table)
+
+
+def print_trends(summary: MetricSummary, series: dict) -> None:
+    console = Console()
+    overview = Table(title=f"myHealth offline trends ({summary.period_days} days)")
+    overview.add_column("Metric")
+    overview.add_column("Value")
+    overview.add_column("Delta vs previous period")
+    overview.add_row(
+        "Sleep avg",
+        _fmt(summary.sleep_hours_avg, " h"),
+        _delta_text(summary.trend_changes.get("sleep_hours_delta")),
+    )
+    overview.add_row(
+        "Resting HR avg",
+        _fmt(summary.resting_hr_avg, " bpm"),
+        _delta_text(summary.trend_changes.get("resting_hr_delta")),
+    )
+    overview.add_row(
+        "HRV avg",
+        _fmt(summary.hrv_ms_avg, " ms"),
+        _delta_text(summary.trend_changes.get("hrv_ms_delta")),
+    )
+    overview.add_row("Recovery", f"{summary.recovery_score}/100", summary.recovery_status)
+    overview.add_row(
+        "Strength frequency",
+        f"{summary.weekly_strength_frequency:.2f}/wk"
+        if summary.weekly_strength_frequency is not None
+        else "n/a",
+        "",
+    )
+    overview.add_row("Total active time", _fmt(summary.total_active_hours, " h"), "")
+    console.print(overview)
+
+    completeness = Table(title="Data completeness")
+    completeness.add_column("Signal")
+    completeness.add_column("Days/Nights", justify="right")
+    for key, label in (
+        ("sleep_nights", "Sleep nights"),
+        ("resting_hr_days", "Resting HR days"),
+        ("hrv_days", "HRV days"),
+        ("workout_days", "Workout days"),
+    ):
+        completeness.add_row(label, str(summary.data_completeness.get(key, 0)))
+    console.print(completeness)
+
+    workout_table = Table(title="Workout breakdown")
+    workout_table.add_column("Type")
+    workout_table.add_column("Count", justify="right")
+    for name, count in sorted(summary.workouts_by_type.items(), key=lambda kv: (-kv[1], kv[0])):
+        workout_table.add_row(name, str(count))
+    if not summary.workouts_by_type:
+        workout_table.add_row("No workouts in this period", "0")
+    console.print(workout_table)
+
+    recent = Table(title="Recent daily series")
+    recent.add_column("Date")
+    recent.add_column("Sleep h", justify="right")
+    recent.add_column("RHR", justify="right")
+    recent.add_column("HRV", justify="right")
+    recent.add_column("Workouts", justify="right")
+    dates = series.get("dates", [])
+    start_idx = max(0, len(dates) - 14)
+    for i in range(start_idx, len(dates)):
+        recent.add_row(
+            dates[i],
+            _fmt(series["sleep_hours"][i]),
+            _fmt(series["resting_hr"][i]),
+            _fmt(series["hrv_ms"][i]),
+            str(series["workouts"][i]),
+        )
+    if not dates:
+        recent.add_row("n/a", "n/a", "n/a", "n/a", "0")
+    console.print(recent)
+
+    for note in summary.notes:
+        console.print(f"- {note}")
 
 
 def write_ai_markdown_report(

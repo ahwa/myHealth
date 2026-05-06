@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from myhealth.analytics import parse_period, summarize
+from myhealth.analytics import daily_series, inspect_database, parse_period, summarize
 from myhealth.ai import build_analysis_prompt
 from myhealth.auth import CODEX_CLIENT_ID, CODEX_REDIRECT_HOST, _authorization_url, _code_from_pasted_value
 from myhealth.apple_health import parse_export
@@ -99,6 +99,52 @@ def test_summary_weekly_strength_frequency(tmp_path):
     expected = 2 * 7 / 30
     assert summary.weekly_strength_frequency is not None
     assert math.isclose(summary.weekly_strength_frequency, expected, rel_tol=1e-6)
+
+
+def test_inspect_database_reports_inventory(tmp_path):
+    conn = connect(tmp_path / "health.sqlite")
+    insert_items(conn, parse_export(FIXTURE))
+
+    inventory = inspect_database(conn, limit=5)
+
+    assert inventory["records"] == 5
+    assert inventory["workouts"] == 2
+    assert inventory["first_date"] is not None
+    assert inventory["latest_date"] is not None
+    assert any(item["type"] == "RestingHeartRate" for item in inventory["record_types"])
+    assert any(item["type"] == "TraditionalStrengthTraining" for item in inventory["workout_types"])
+    assert any(item["source"] == "Apple Watch" for item in inventory["sources"])
+
+
+def test_inspect_command_prints_inventory(tmp_path, capsys):
+    from myhealth import cli as cli_mod
+
+    db = tmp_path / "health.sqlite"
+    conn = connect(db)
+    insert_items(conn, parse_export(FIXTURE))
+
+    cli_mod.inspect(db=db, limit=5)
+    output = capsys.readouterr().out
+
+    assert "myHealth import inventory" in output
+    assert "Records" in output
+    assert "TraditionalStrengthTraining" in output
+
+
+def test_trends_command_prints_offline_summary(tmp_path, capsys):
+    from myhealth import cli as cli_mod
+
+    db = tmp_path / "health.sqlite"
+    conn = connect(db)
+    insert_items(conn, parse_export(FIXTURE))
+
+    cli_mod.trends(period="30d", db=db)
+    output = capsys.readouterr().out
+
+    assert "offline trends" in output
+    assert "Sleep avg" in output
+    assert "Workout breakdown" in output
+    assert "TraditionalStrengthTraining" in output
 
 
 def test_ai_prompt_uses_summary_not_raw_records():

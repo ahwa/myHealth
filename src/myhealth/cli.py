@@ -9,12 +9,18 @@ from openai import OpenAIError
 from rich.console import Console
 
 from .ai import DEFAULT_CODEX_MODEL, DEFAULT_MODEL, analyze_with_ai, analyze_with_codex_oauth
-from .analytics import parse_period, summarize
+from .analytics import daily_series, inspect_database, parse_period, summarize
 from .apple_health import parse_export
 from .auth import AUTH_PATH, clear_codex_token, get_codex_token, login_openai_codex
 from .config import DEFAULT_CONFIG_PATH, DEFAULT_DB_PATH, load_config, set_config_value
 from .models import PlanningStyle
-from .reports import print_ai_analysis, write_ai_html_report, write_ai_markdown_report
+from .reports import (
+    print_ai_analysis,
+    print_inspection,
+    print_trends,
+    write_ai_html_report,
+    write_ai_markdown_report,
+)
 from .storage import clear, connect, insert_items
 
 
@@ -82,6 +88,28 @@ def import_export(
     console.print(
         f"Imported {counts['records']} records and {counts['workouts']} workouts into {db}"
     )
+
+
+@app.command()
+def inspect(
+    db: Path = typer.Option(DEFAULT_DB_PATH, help="SQLite database path."),
+    limit: int = typer.Option(20, min=1, max=100, help="Rows to show per inventory table."),
+) -> None:
+    """Inspect imported Apple Health data without calling AI."""
+    inventory = inspect_database(connect(db), limit=limit)
+    print_inspection(inventory)
+
+
+@app.command()
+def trends(
+    period: str = typer.Option("30d", help="Analysis period, such as 7d, 30d, or 4w."),
+    db: Path = typer.Option(DEFAULT_DB_PATH, help="SQLite database path."),
+) -> None:
+    """Show offline health and workout trends without calling AI."""
+    days = parse_period(period)
+    conn = connect(db)
+    summary = summarize(conn, days)
+    print_trends(summary, daily_series(conn, days))
 
 
 @app.command()

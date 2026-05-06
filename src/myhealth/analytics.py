@@ -17,6 +17,16 @@ STRENGTH_WORKOUTS = {
 }
 
 
+def _clean_health_type(value: str | None) -> str:
+    if not value:
+        return "Unknown"
+    return (
+        value.removeprefix("HKQuantityTypeIdentifier")
+        .removeprefix("HKCategoryTypeIdentifier")
+        .removeprefix("HKWorkoutActivityType")
+    )
+
+
 def parse_period(period: str) -> int:
     """Parse '7d', '30d', '4w' and the like into a positive number of days."""
     if not period:
@@ -118,6 +128,75 @@ def daily_series(conn: sqlite3.Connection, period_days: int) -> dict:
     }
 
 
+def inspect_database(conn: sqlite3.Connection, limit: int = 20) -> dict:
+    """Return record/workout/source inventory for the imported Health cache."""
+    record_total = int(conn.execute("SELECT COUNT(*) AS c FROM records").fetchone()["c"])
+    workout_total = int(conn.execute("SELECT COUNT(*) AS c FROM workouts").fetchone()["c"])
+    first = conn.execute(
+        """
+        SELECT MIN(min_date) AS first FROM (
+          SELECT MIN(start_date) AS min_date FROM records
+          UNION ALL
+          SELECT MIN(start_date) AS min_date FROM workouts
+        )
+        """
+    ).fetchone()["first"]
+    latest = conn.execute(
+        """
+        SELECT MAX(max_date) AS latest FROM (
+          SELECT MAX(end_date) AS max_date FROM records
+          UNION ALL
+          SELECT MAX(end_date) AS max_date FROM workouts
+        )
+        """
+    ).fetchone()["latest"]
+
+    record_types = [
+        {"type": _clean_health_type(row["type"]), "raw_type": row["type"], "count": int(row["c"])}
+        for row in conn.execute(
+            """
+            SELECT type, COUNT(*) AS c FROM records
+            GROUP BY type ORDER BY c DESC, type ASC LIMIT ?
+            """,
+            (limit,),
+        ).fetchall()
+    ]
+    workout_types = [
+        {"type": _clean_health_type(row["type"]), "raw_type": row["type"], "count": int(row["c"])}
+        for row in conn.execute(
+            """
+            SELECT type, COUNT(*) AS c FROM workouts
+            GROUP BY type ORDER BY c DESC, type ASC LIMIT ?
+            """,
+            (limit,),
+        ).fetchall()
+    ]
+    sources = [
+        {"source": row["source"] or "Unknown", "kind": row["kind"], "count": int(row["c"])}
+        for row in conn.execute(
+            """
+            SELECT source, kind, COUNT(*) AS c FROM (
+              SELECT source, 'record' AS kind FROM records
+              UNION ALL
+              SELECT source, 'workout' AS kind FROM workouts
+            )
+            GROUP BY source, kind ORDER BY c DESC, source ASC LIMIT ?
+            """,
+            (limit,),
+        ).fetchall()
+    ]
+
+    return {
+        "records": record_total,
+        "workouts": workout_total,
+        "first_date": first,
+        "latest_date": latest,
+        "record_types": record_types,
+        "workout_types": workout_types,
+        "sources": sources,
+    }
+
+
 def _quantity_distinct_days(
     conn: sqlite3.Connection, metric_type: str, start: datetime, end: datetime
 ) -> int:
@@ -203,8 +282,7 @@ def summarize(conn: sqlite3.Connection, period_days: int) -> MetricSummary:
     total_minutes = 0.0
     for row in workout_rows:
         # Strip Apple's HKWorkoutActivityType prefix for human-readable keys.
-        raw_type = row["type"] or "Unknown"
-        clean = raw_type.removeprefix("HKWorkoutActivityType") if raw_type else "Unknown"
+        clean = _clean_health_type(row["type"])
         workouts_by_type[clean] = workouts_by_type.get(clean, 0) + 1
         if row["duration_minutes"] is not None:
             total_minutes += float(row["duration_minutes"])
@@ -295,4 +373,3 @@ def summarize(conn: sqlite3.Connection, period_days: int) -> MetricSummary:
         recovery_status=status,
         notes=notes or ["Not enough trend data yet; recommendations use available signals."],
     )
-
