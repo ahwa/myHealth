@@ -4,6 +4,7 @@ version = "0.1.0"
 description = "Local Apple Health export analytics and strength workout planning CLI."
 requires-python = ">=3.11"
 dependencies = [
+  "openai>=2.0",
   "pydantic>=1.10",
   "rich>=13",
   "typer>=0.9",
@@ -21,4 +22,3 @@ build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
 where = ["src"]
-

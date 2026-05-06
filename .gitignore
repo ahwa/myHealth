@@ -6,10 +6,10 @@ __pycache__/
 .ruff_cache/
 .venv/
 venv/
+*.egg-info/
 
 # Local health data and generated outputs
 export.zip
 *.sqlite
 *.sqlite3
 reports/
-
