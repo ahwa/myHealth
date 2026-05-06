@@ -144,6 +144,7 @@ def test_trends_command_prints_offline_summary(tmp_path, capsys):
     assert "offline trends" in output
     assert "Sleep avg" in output
     assert "Workout breakdown" in output
+    assert "Recent daily series" in output
     assert "TraditionalStrengthTraining" in output
 
 
@@ -215,6 +216,12 @@ def test_daily_series_returns_one_entry_per_day_in_window(tmp_path):
     assert len(series["sleep_hours"]) == n
     assert len(series["resting_hr"]) == n
     assert len(series["hrv_ms"]) == n
+    assert len(series["steps"]) == n
+    assert len(series["active_energy_kcal"]) == n
+    assert len(series["exercise_minutes"]) == n
+    assert len(series["active_hours"]) == n
+    assert len(series["distance_mi"]) == n
+    assert len(series["physical_effort"]) == n
     assert len(series["workouts"]) == n
     # The fixture's RHR readings of 58 and 55 should appear somewhere as numbers
     rhr = [v for v in series["resting_hr"] if v is not None]
@@ -432,6 +439,8 @@ def test_daily_series_handles_empty_db(tmp_path):
     series = daily_series(conn, 7)
     assert len(series["dates"]) == 7
     assert all(v is None for v in series["sleep_hours"])
+    assert all(v is None for v in series["steps"])
+    assert all(v == 0 for v in series["active_hours"])
     assert all(v == 0 for v in series["workouts"])
 
 

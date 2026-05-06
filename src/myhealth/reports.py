@@ -17,6 +17,10 @@ def _fmt(value: float | None, suffix: str = "") -> str:
     return "n/a" if value is None else f"{value:.1f}{suffix}"
 
 
+def _fmt_int(value: float | int | None) -> str:
+    return "n/a" if value is None else f"{round(value):,}"
+
+
 def _fmt_iso_date(value: str | None) -> str:
     if not value:
         return "n/a"
@@ -171,12 +175,18 @@ def print_trends(summary: MetricSummary, series: dict) -> None:
         workout_table.add_row("No workouts in this period", "0")
     console.print(workout_table)
 
-    recent = Table(title="Recent daily series")
-    recent.add_column("Date")
-    recent.add_column("Sleep h", justify="right")
-    recent.add_column("RHR", justify="right")
-    recent.add_column("HRV", justify="right")
-    recent.add_column("Workouts", justify="right")
+    recent = Table(title="Recent daily series", expand=True)
+    recent.add_column("Date", no_wrap=True)
+    recent.add_column("Sleep", justify="right", no_wrap=True)
+    recent.add_column("RHR", justify="right", no_wrap=True)
+    recent.add_column("HRV", justify="right", no_wrap=True)
+    recent.add_column("Steps", justify="right", no_wrap=True)
+    recent.add_column("Kcal", justify="right", no_wrap=True)
+    recent.add_column("Ex min", justify="right", no_wrap=True)
+    recent.add_column("Act h", justify="right", no_wrap=True)
+    recent.add_column("Miles", justify="right", no_wrap=True)
+    recent.add_column("Effort", justify="right", no_wrap=True)
+    recent.add_column("WO", justify="right", no_wrap=True)
     dates = series.get("dates", [])
     start_idx = max(0, len(dates) - 14)
     for i in range(start_idx, len(dates)):
@@ -185,10 +195,16 @@ def print_trends(summary: MetricSummary, series: dict) -> None:
             _fmt(series["sleep_hours"][i]),
             _fmt(series["resting_hr"][i]),
             _fmt(series["hrv_ms"][i]),
+            _fmt_int(series["steps"][i]),
+            _fmt_int(series["active_energy_kcal"][i]),
+            _fmt_int(series["exercise_minutes"][i]),
+            _fmt(series["active_hours"][i]),
+            _fmt(series["distance_mi"][i]),
+            _fmt(series["physical_effort"][i]),
             str(series["workouts"][i]),
         )
     if not dates:
-        recent.add_row("n/a", "n/a", "n/a", "n/a", "0")
+        recent.add_row("n/a", "n/a", "n/a", "n/a", "n/a", "n/a", "n/a", "n/a", "n/a", "n/a", "0")
     console.print(recent)
 
     for note in summary.notes:

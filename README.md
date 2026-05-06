@@ -51,6 +51,8 @@ myhealth config show
 myhealth auth status
 ```
 
+`myhealth trends` shows an offline daily table with sleep, RHR, HRV, steps, active calories, exercise minutes, active workout hours, walking/running distance, physical effort, and workout count.
+
 The app reads Apple Health export files and stores a SQLite cache locally in:
 
 ```text

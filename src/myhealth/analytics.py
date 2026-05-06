@@ -11,6 +11,11 @@ from .storage import latest_datetime
 SLEEP_TYPE = "HKCategoryTypeIdentifierSleepAnalysis"
 RESTING_HR_TYPE = "HKQuantityTypeIdentifierRestingHeartRate"
 HRV_TYPE = "HKQuantityTypeIdentifierHeartRateVariabilitySDNN"
+STEP_COUNT_TYPE = "HKQuantityTypeIdentifierStepCount"
+ACTIVE_ENERGY_TYPE = "HKQuantityTypeIdentifierActiveEnergyBurned"
+DISTANCE_WALK_RUN_TYPE = "HKQuantityTypeIdentifierDistanceWalkingRunning"
+EXERCISE_TIME_TYPE = "HKQuantityTypeIdentifierAppleExerciseTime"
+PHYSICAL_EFFORT_TYPE = "HKQuantityTypeIdentifierPhysicalEffort"
 STRENGTH_WORKOUTS = {
     "HKWorkoutActivityTypeTraditionalStrengthTraining",
     "HKWorkoutActivityTypeFunctionalStrengthTraining",
@@ -57,8 +62,9 @@ def _stdev(values: list[float]) -> float | None:
 def daily_series(conn: sqlite3.Connection, period_days: int) -> dict:
     """Return aligned per-day arrays for the analysis window.
 
-    Output keys: dates (list[str] yyyy-mm-dd), sleep_hours, resting_hr, hrv_ms
-    (each list[float | None] of length period_days), and workouts (list[int]).
+    Output keys: dates (list[str] yyyy-mm-dd), sleep_hours, resting_hr, hrv_ms,
+    steps, active_energy_kcal, exercise_minutes, active_hours, distance_mi,
+    physical_effort, and workouts.
     """
     end = latest_datetime(conn) or datetime.now().astimezone()
     start = end - timedelta(days=period_days)
@@ -83,6 +89,23 @@ def daily_series(conn: sqlite3.Connection, period_days: int) -> dict:
             if i is not None and row["value"] is not None:
                 out[i].append(float(row["value"]))
         return [round(sum(v) / len(v), 2) if v else None for v in out]
+
+    def _sum_by_day(metric_type: str) -> list[float | None]:
+        out = [0.0 for _ in days]
+        seen = [False for _ in days]
+        rows = conn.execute(
+            """
+            SELECT substr(start_date, 1, 10) AS d, value FROM records
+            WHERE type = ? AND value IS NOT NULL AND start_date >= ? AND start_date < ?
+            """,
+            (metric_type, start.isoformat(), end.isoformat()),
+        ).fetchall()
+        for row in rows:
+            i = idx.get(row["d"])
+            if i is not None and row["value"] is not None:
+                out[i] += float(row["value"])
+                seen[i] = True
+        return [round(v, 2) if seen[i] else None for i, v in enumerate(out)]
 
     # Sleep: sum 'Asleep*' segments per night, bucketed by the WAKE date (the
     # segment's end date). Matches Apple Health's UI and keeps a night that
@@ -110,20 +133,32 @@ def daily_series(conn: sqlite3.Connection, period_days: int) -> dict:
             sleep_per_day[i] = round(hrs, 2)
 
     workouts_per_day = [0] * len(days)
+    workout_minutes_per_day = [0.0] * len(days)
     rows = conn.execute(
-        "SELECT substr(start_date, 1, 10) AS d FROM workouts WHERE start_date >= ? AND start_date < ?",
+        """
+        SELECT substr(start_date, 1, 10) AS d, duration_minutes
+        FROM workouts WHERE start_date >= ? AND start_date < ?
+        """,
         (start.isoformat(), end.isoformat()),
     ).fetchall()
     for row in rows:
         i = idx.get(row["d"])
         if i is not None:
             workouts_per_day[i] += 1
+            if row["duration_minutes"] is not None:
+                workout_minutes_per_day[i] += float(row["duration_minutes"])
 
     return {
         "dates": date_strs,
         "sleep_hours": sleep_per_day,
         "resting_hr": _avg_by_day(RESTING_HR_TYPE),
         "hrv_ms": _avg_by_day(HRV_TYPE),
+        "steps": _sum_by_day(STEP_COUNT_TYPE),
+        "active_energy_kcal": _sum_by_day(ACTIVE_ENERGY_TYPE),
+        "exercise_minutes": _sum_by_day(EXERCISE_TIME_TYPE),
+        "active_hours": [round(v / 60, 2) if v else 0 for v in workout_minutes_per_day],
+        "distance_mi": _sum_by_day(DISTANCE_WALK_RUN_TYPE),
+        "physical_effort": _avg_by_day(PHYSICAL_EFFORT_TYPE),
         "workouts": workouts_per_day,
     }
 
