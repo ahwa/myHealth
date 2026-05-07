@@ -43,6 +43,7 @@ Common commands:
 myhealth import export.zip                  # one-time: load Apple Health export
 myhealth inspect                            # offline inventory of imported data
 myhealth trends --period 30d                # offline terminal trends, no AI call
+myhealth prs --period 90d                   # offline personal records + workout streaks
 myhealth report                              # 30d window, 7-day plan, OAuth
 myhealth plan --days 14 --style aggressive   # custom plan length and style
 myhealth plan --model gpt-5.5                # override the Codex model if needed
