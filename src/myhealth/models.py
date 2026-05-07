@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import date, datetime
 from enum import Enum
 from typing import Optional
 
@@ -67,3 +67,35 @@ class AIHealthAnalysis(BaseModel):
     recovery_assessment: str
     workout_plan: list[PlannedDay]
     cautions: list[str]
+
+
+class PersonalRecord(BaseModel):
+    metric: str
+    value: float
+    unit: str
+    occurred_on: date
+    higher_is_better: bool = True
+
+
+class PersonalRecords(BaseModel):
+    period_days: int
+    records: list[PersonalRecord]
+    current_streak_days: int
+    longest_streak_days: int
+    current_exercise_streak_days: int
+
+
+class HabitStreak(BaseModel):
+    metric: str
+    threshold: float
+    direction: str               # ">=" or "<="
+    current_streak: int
+    longest_streak: int
+    last_met_date: Optional[date]
+    active_today: bool
+
+
+class HabitStreaks(BaseModel):
+    period_days: int
+    anchor_date: Optional[date]
+    streaks: list[HabitStreak]

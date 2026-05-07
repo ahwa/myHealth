@@ -9,7 +9,14 @@ from openai import OpenAIError
 from rich.console import Console
 
 from .ai import DEFAULT_CODEX_MODEL, DEFAULT_MODEL, analyze_with_ai, analyze_with_codex_oauth
-from .analytics import daily_series, inspect_database, parse_period, summarize
+from .analytics import (
+    compute_streaks,
+    daily_series,
+    inspect_database,
+    parse_period,
+    personal_records,
+    summarize,
+)
 from .apple_health import parse_export
 from .auth import AUTH_PATH, clear_codex_token, get_codex_token, login_openai_codex
 from .config import DEFAULT_CONFIG_PATH, DEFAULT_DB_PATH, load_config, set_config_value
@@ -17,6 +24,8 @@ from .models import PlanningStyle
 from .reports import (
     print_ai_analysis,
     print_inspection,
+    print_personal_records,
+    print_streaks,
     print_trends,
     write_ai_html_report,
     write_ai_markdown_report,
@@ -110,6 +119,60 @@ def trends(
     conn = connect(db)
     summary = summarize(conn, days)
     print_trends(summary, daily_series(conn, days))
+
+
+@app.command()
+def prs(
+    period: str = typer.Option("90d", help="Window for streak calculations (all-time records ignore this)."),
+    db: Path = typer.Option(DEFAULT_DB_PATH, help="SQLite database path."),
+) -> None:
+    """Show offline personal records and workout streaks (no AI call)."""
+    days = parse_period(period)
+    conn = connect(db)
+    prs_data = personal_records(conn, days)
+    print_personal_records(prs_data)
+
+
+GOAL_ALIASES: dict[str, str] = {
+    "sleep":          "sleep_hours",
+    "sleep_hours":    "sleep_hours",
+    "steps":          "steps",
+    "hrv":            "hrv_ms",
+    "hrv_ms":         "hrv_ms",
+    "rhr":            "rhr",
+    "calories":       "active_calories",
+    "active_calories": "active_calories",
+}
+
+
+def _parse_goal_overrides(tokens: list[str]) -> dict[str, float]:
+    out: dict[str, float] = {}
+    for tok in tokens:
+        if "=" not in tok:
+            raise typer.BadParameter(f"--goal must look like name=number (got {tok!r})")
+        name, _, raw = tok.partition("=")
+        key = GOAL_ALIASES.get(name.strip().lower())
+        if key is None:
+            raise typer.BadParameter(f"Unknown --goal metric: {name!r}")
+        try:
+            out[key] = float(raw)
+        except ValueError as exc:
+            raise typer.BadParameter(f"--goal value must be numeric (got {raw!r})") from exc
+    return out
+
+
+@app.command()
+def streaks(
+    period: str = typer.Option("90d", help="Window, e.g. 30d, 90d, 12w."),
+    goal: list[str] = typer.Option(None, "--goal", help="Override threshold, e.g. --goal sleep=8. Repeatable."),
+    db: Path = typer.Option(DEFAULT_DB_PATH, help="SQLite database path."),
+) -> None:
+    """Show offline habit streaks (no AI call)."""
+    days = parse_period(period)
+    overrides = _parse_goal_overrides(goal or [])
+    conn = connect(db)
+    streaks_data = compute_streaks(conn, days, overrides)
+    print_streaks(streaks_data)
 
 
 @app.command()

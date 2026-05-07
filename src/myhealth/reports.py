@@ -9,8 +9,8 @@ from pathlib import Path
 from rich.console import Console
 from rich.table import Table
 
-from .analytics import daily_series
-from .models import AIHealthAnalysis, MetricSummary, PlanningStyle
+from .analytics import daily_series, personal_records
+from .models import AIHealthAnalysis, HabitStreaks, MetricSummary, PersonalRecords, PlanningStyle
 
 
 def _fmt(value: float | None, suffix: str = "") -> str:
@@ -211,6 +211,82 @@ def print_trends(summary: MetricSummary, series: dict) -> None:
         console.print(f"- {note}")
 
 
+def _fmt_pr_value(pr) -> str:
+    """Render a PersonalRecord value for the terminal table."""
+    if pr.unit in {"steps", "kcal"}:
+        return f"{_fmt_int(pr.value)} {pr.unit}"
+    # f"{v:g}" trims trailing zeros: 55.0 -> "55", 7.25 -> "7.25"
+    return f"{pr.value:g} {pr.unit}"
+
+
+def print_personal_records(prs: PersonalRecords) -> None:
+    console = Console()
+
+    records_table = Table(title="myHealth personal records")
+    records_table.add_column("Metric")
+    records_table.add_column("Value")
+    records_table.add_column("Date")
+    if prs.records:
+        for pr in prs.records:
+            records_table.add_row(pr.metric, _fmt_pr_value(pr), pr.occurred_on.isoformat())
+    else:
+        records_table.add_row("No personal records yet", "-", "-")
+    console.print(records_table)
+
+    streaks_table = Table(title="Streaks")
+    streaks_table.add_column("Streak")
+    streaks_table.add_column("Days", justify="right")
+    streaks_table.add_row("Current workout streak", str(prs.current_streak_days))
+    streaks_table.add_row(
+        f"Longest workout streak (last {prs.period_days}d)",
+        str(prs.longest_streak_days),
+    )
+    streaks_table.add_row("Current exercise-minutes streak", str(prs.current_exercise_streak_days))
+    console.print(streaks_table)
+
+
+METRIC_LABELS: dict[str, tuple[str, str]] = {
+    "sleep_hours":     ("Sleep",           "h"),
+    "steps":           ("Steps",           "steps"),
+    "hrv_ms":          ("HRV (SDNN)",      "ms"),
+    "active_calories": ("Active calories", "kcal"),
+    "rhr":             ("Resting HR",      "bpm"),
+}
+
+
+def print_streaks(streaks: "HabitStreaks") -> None:
+    """Print a Rich table of habit streaks."""
+    console = Console()
+    table = Table(title=f"myhealth streaks — {streaks.period_days} days")
+    table.add_column("Metric")
+    table.add_column("Threshold")
+    table.add_column("Current", justify="right")
+    table.add_column("Longest", justify="right")
+    table.add_column("Last met")
+    table.add_column("Status")
+
+    if streaks.anchor_date is None:
+        table.add_row("No data", "-", "-", "-", "-", "-")
+        console.print(table)
+        return
+
+    for s in streaks.streaks:
+        label, unit = METRIC_LABELS.get(s.metric, (s.metric, ""))
+        threshold_str = f"{s.direction} {s.threshold:,.0f} {unit}"
+        last_met = s.last_met_date.isoformat() if s.last_met_date is not None else "never"
+        status = "[green]active[/green]" if s.active_today else "[red]broken[/red]"
+        table.add_row(
+            label,
+            threshold_str,
+            str(s.current_streak),
+            str(s.longest_streak),
+            last_met,
+            status,
+        )
+
+    console.print(table)
+
+
 def write_ai_markdown_report(
     summary: MetricSummary,
     analysis: AIHealthAnalysis,
@@ -381,6 +457,8 @@ _HTML_TEMPLATE = """<!doctype html>
 </div>
 <div class="types">{workout_type_pills}</div>
 
+{personal_records_block}
+
 <h2>Trends ({period_days} days)</h2>
 <div class="chart-wrap"><canvas id="ch_sleep"></canvas></div>
 <div class="chart-wrap"><canvas id="ch_rhr"></canvas></div>
@@ -450,8 +528,30 @@ def write_ai_html_report(
     # Daily series for charts. Empty arrays if no DB connection was provided.
     if db_conn is not None:
         series = daily_series(db_conn, summary.period_days)
+        prs = personal_records(db_conn, summary.period_days)
+        if prs.records:
+            pr_pills = "".join(
+                f'<span class="pill"><b>{_fmt_pr_value(pr)}</b> '
+                f'{html.escape(pr.metric)} · {pr.occurred_on.isoformat()}</span>'
+                for pr in prs.records
+            )
+        else:
+            pr_pills = '<span class="meta">No personal records in this DB.</span>'
+        personal_records_block = (
+            "<h2>Personal records</h2>\n"
+            "<div class=\"grid\">\n"
+            f"  <div class=\"card\"><div>Current workout streak</div>"
+            f"<div class=\"kpi\">{prs.current_streak_days}<small> days</small></div></div>\n"
+            f"  <div class=\"card\"><div>Longest streak (last {prs.period_days}d)</div>"
+            f"<div class=\"kpi\">{prs.longest_streak_days}<small> days</small></div></div>\n"
+            f"  <div class=\"card\"><div>Exercise-minutes streak</div>"
+            f"<div class=\"kpi\">{prs.current_exercise_streak_days}<small> days</small></div></div>\n"
+            "</div>\n"
+            f"<div class=\"types\">{pr_pills}</div>"
+        )
     else:
         series = {"dates": [], "sleep_hours": [], "resting_hr": [], "hrv_ms": [], "workouts": []}
+        personal_records_block = ""
 
     insights_html = "".join(f"<li>{html.escape(i)}</li>" for i in analysis.key_insights) or "<li>None</li>"
 
@@ -505,6 +605,7 @@ def write_ai_html_report(
         total_active_hours=(f"{summary.total_active_hours:.1f}"
                             if summary.total_active_hours is not None else "n/a"),
         workout_type_pills=workout_type_pills,
+        personal_records_block=personal_records_block,
         c_sleep=summary.data_completeness.get("sleep_nights", 0),
         c_rhr=summary.data_completeness.get("resting_hr_days", 0),
         c_hrv=summary.data_completeness.get("hrv_days", 0),

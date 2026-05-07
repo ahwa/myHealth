@@ -2,9 +2,9 @@ from __future__ import annotations
 
 import sqlite3
 import statistics
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 
-from .models import MetricSummary
+from .models import HabitStreak, HabitStreaks, MetricSummary, PersonalRecord, PersonalRecords
 from .storage import latest_datetime
 
 
@@ -20,6 +20,8 @@ STRENGTH_WORKOUTS = {
     "HKWorkoutActivityTypeTraditionalStrengthTraining",
     "HKWorkoutActivityTypeFunctionalStrengthTraining",
 }
+RUNNING_WORKOUT = "HKWorkoutActivityTypeRunning"
+WALKING_WORKOUT = "HKWorkoutActivityTypeWalking"
 
 
 def _clean_health_type(value: str | None) -> str:
@@ -407,4 +409,396 @@ def summarize(conn: sqlite3.Connection, period_days: int) -> MetricSummary:
         recovery_score=score,
         recovery_status=status,
         notes=notes or ["Not enough trend data yet; recommendations use available signals."],
+    )
+
+
+def _workout_pr(
+    conn: sqlite3.Connection,
+    types: set[str] | None,
+    column: str,
+    label: str,
+    unit: str,
+    higher_is_better: bool = True,
+    transform=None,
+    round_dp: int | None = None,
+) -> PersonalRecord | None:
+    """Return the best workout row's PR for ``column`` across ``types``.
+
+    ``types`` None means any workout type. ``transform`` is an optional callable
+    applied to the raw value before rounding. Ties resolve to the earliest date.
+    """
+    agg = "MAX" if higher_is_better else "MIN"
+    params: list = []
+    where = [f"{column} IS NOT NULL"]
+    if types:
+        placeholders = ",".join("?" for _ in types)
+        where.append(f"type IN ({placeholders})")
+        params.extend(sorted(types))
+    where_sql = " AND ".join(where)
+    # Pick the winning value first, then the earliest row tied to that value.
+    best_row = conn.execute(
+        f"""
+        SELECT {column} AS v, substr(start_date, 1, 10) AS d
+        FROM workouts WHERE {where_sql}
+        ORDER BY {column} {'DESC' if higher_is_better else 'ASC'}, start_date ASC
+        LIMIT 1
+        """,
+        params,
+    ).fetchone()
+    if not best_row or best_row["v"] is None:
+        return None
+    value = float(best_row["v"])
+    if transform is not None:
+        value = transform(value)
+    if round_dp is not None:
+        value = round(value, round_dp)
+    return PersonalRecord(
+        metric=label,
+        value=value,
+        unit=unit,
+        occurred_on=date.fromisoformat(best_row["d"]),
+        higher_is_better=higher_is_better,
+    )
+
+
+def _grouped_daily_pr(
+    conn: sqlite3.Connection,
+    metric_type: str,
+    label: str,
+    unit: str,
+    higher_is_better: bool = True,
+    aggregate: str = "SUM",
+    round_dp: int | None = None,
+) -> PersonalRecord | None:
+    """Return the PR for a records metric grouped by day.
+
+    ``aggregate`` chooses how rows within a day are combined (e.g. SUM for steps,
+    MAX for a raw-row metric that should NOT be summed). ``higher_is_better``
+    determines which day wins. Ties resolve to the earliest date.
+    """
+    best_agg = "MAX" if higher_is_better else "MIN"
+    rows = conn.execute(
+        f"""
+        SELECT substr(start_date, 1, 10) AS d, {aggregate}(value) AS v
+        FROM records
+        WHERE type = ? AND value IS NOT NULL
+        GROUP BY substr(start_date, 1, 10)
+        ORDER BY v {'DESC' if higher_is_better else 'ASC'}, d ASC
+        LIMIT 1
+        """,
+        (metric_type,),
+    ).fetchone()
+    if not rows or rows["v"] is None:
+        return None
+    value = float(rows["v"])
+    if round_dp is not None:
+        value = round(value, round_dp)
+    return PersonalRecord(
+        metric=label,
+        value=value,
+        unit=unit,
+        occurred_on=date.fromisoformat(rows["d"]),
+        higher_is_better=higher_is_better,
+    )
+
+
+def _sleep_pr(conn: sqlite3.Connection) -> PersonalRecord | None:
+    """Longest sleep night (sum Asleep* segments bucketed by wake date)."""
+    rows = conn.execute(
+        """
+        SELECT start_date, end_date, value_text FROM records
+        WHERE type = ?
+        """,
+        (SLEEP_TYPE,),
+    ).fetchall()
+    by_night: dict[str, float] = {}
+    for row in rows:
+        if "Asleep" not in (row["value_text"] or ""):
+            continue
+        started = datetime.fromisoformat(row["start_date"])
+        ended = datetime.fromisoformat(row["end_date"])
+        hours = max((ended - started).total_seconds(), 0) / 3600
+        night = ended.date().isoformat()
+        by_night[night] = by_night.get(night, 0.0) + hours
+    if not by_night:
+        return None
+    best_hours = max(by_night.values())
+    # Earliest-date tiebreak.
+    best_day = min(d for d, h in by_night.items() if h == best_hours)
+    return PersonalRecord(
+        metric="Longest sleep night",
+        value=round(best_hours, 2),
+        unit="h",
+        occurred_on=date.fromisoformat(best_day),
+        higher_is_better=True,
+    )
+
+
+def _workout_days(conn: sqlite3.Connection, since: date | None = None) -> set[date]:
+    params: list = []
+    where = ""
+    if since is not None:
+        where = "WHERE start_date >= ?"
+        params.append(since.isoformat())
+    rows = conn.execute(
+        f"SELECT DISTINCT substr(start_date, 1, 10) AS d FROM workouts {where}",
+        params,
+    ).fetchall()
+    return {date.fromisoformat(row["d"]) for row in rows if row["d"]}
+
+
+def _exercise_days(conn: sqlite3.Connection, since: date, threshold: float = 30.0) -> set[date]:
+    rows = conn.execute(
+        """
+        SELECT substr(start_date, 1, 10) AS d, SUM(value) AS total
+        FROM records
+        WHERE type = ? AND value IS NOT NULL AND start_date >= ?
+        GROUP BY substr(start_date, 1, 10)
+        HAVING total >= ?
+        """,
+        (EXERCISE_TIME_TYPE, since.isoformat(), threshold),
+    ).fetchall()
+    return {date.fromisoformat(row["d"]) for row in rows if row["d"]}
+
+
+def _current_streak(days: set[date], anchor: date) -> int:
+    if not days or anchor not in days:
+        return 0
+    streak = 0
+    cursor = anchor
+    while cursor in days:
+        streak += 1
+        cursor = cursor - timedelta(days=1)
+    return streak
+
+
+def _longest_streak(days: set[date]) -> int:
+    if not days:
+        return 0
+    sorted_days = sorted(days)
+    best = 1
+    current = 1
+    for prev, curr in zip(sorted_days, sorted_days[1:]):
+        if curr - prev == timedelta(days=1):
+            current += 1
+            best = max(best, current)
+        else:
+            current = 1
+    return best
+
+
+DEFAULT_STREAK_THRESHOLDS: dict[str, tuple[float, str]] = {
+    "sleep_hours":     (7.0,    ">="),
+    "steps":           (8000.0, ">="),
+    "hrv_ms":          (50.0,   ">="),
+    "active_calories": (400.0,  ">="),
+    "rhr":             (60.0,   "<="),
+}
+
+# Maps canonical streak metric key -> daily_series list key
+_STREAK_SERIES_KEY: dict[str, str] = {
+    "sleep_hours":     "sleep_hours",
+    "steps":           "steps",
+    "hrv_ms":          "hrv_ms",
+    "active_calories": "active_energy_kcal",
+    "rhr":             "resting_hr",
+}
+
+
+def _meets(value: float | None, threshold: float, direction: str) -> bool:
+    if value is None:
+        return False
+    return value >= threshold if direction == ">=" else value <= threshold
+
+
+def compute_streaks(
+    conn: sqlite3.Connection,
+    period_days: int = 90,
+    thresholds: dict[str, float] | None = None,
+) -> HabitStreaks:
+    """Compute habit streaks for the default set of metrics over the given window."""
+    latest = latest_datetime(conn)
+    if latest is None:
+        return HabitStreaks(period_days=period_days, anchor_date=None, streaks=[])
+
+    anchor_date = latest.date()
+    series = daily_series(conn, period_days)
+    dates = series["dates"]  # oldest -> newest
+
+    streaks: list[HabitStreak] = []
+    for metric_key, (default_threshold, direction) in DEFAULT_STREAK_THRESHOLDS.items():
+        threshold = (thresholds or {}).get(metric_key, default_threshold)
+        series_key = _STREAK_SERIES_KEY[metric_key]
+        values = series[series_key]
+        met = [_meets(v, threshold, direction) for v in values]
+
+        # Longest streak: single-pass max run
+        longest = 0
+        run = 0
+        for m in met:
+            if m:
+                run += 1
+                longest = max(longest, run)
+            else:
+                run = 0
+
+        # Current streak: count trailing True from end
+        current = 0
+        for m in reversed(met):
+            if m:
+                current += 1
+            else:
+                break
+
+        # last_met_date: highest index i where met[i] is True
+        last_met_date = None
+        for i in range(len(met) - 1, -1, -1):
+            if met[i]:
+                last_met_date = date.fromisoformat(dates[i])
+                break
+
+        streaks.append(HabitStreak(
+            metric=metric_key,
+            threshold=threshold,
+            direction=direction,
+            current_streak=current,
+            longest_streak=longest,
+            last_met_date=last_met_date,
+            active_today=current >= 1,
+        ))
+
+    return HabitStreaks(
+        period_days=period_days,
+        anchor_date=anchor_date,
+        streaks=streaks,
+    )
+
+
+def personal_records(conn: sqlite3.Connection, period_days: int = 90) -> PersonalRecords:
+    """Compute all-time personal records and recent workout streaks."""
+    records: list[PersonalRecord] = []
+
+    # All-time records — each helper returns None if the underlying metric has
+    # no rows, in which case we skip the PR (sparse list).
+    longest_run = _workout_pr(
+        conn,
+        types={RUNNING_WORKOUT},
+        column="distance_km",
+        label="Longest run",
+        unit="mi",
+        transform=lambda v: v / 1.609344,
+        round_dp=2,
+    )
+    if longest_run is not None:
+        records.append(longest_run)
+
+    longest_walk = _workout_pr(
+        conn,
+        types={WALKING_WORKOUT},
+        column="distance_km",
+        label="Longest walk",
+        unit="mi",
+        transform=lambda v: v / 1.609344,
+        round_dp=2,
+    )
+    if longest_walk is not None:
+        records.append(longest_walk)
+
+    longest_workout = _workout_pr(
+        conn,
+        types=None,
+        column="duration_minutes",
+        label="Longest workout",
+        unit="min",
+        round_dp=1,
+    )
+    if longest_workout is not None:
+        records.append(longest_workout)
+
+    biggest_burn = _workout_pr(
+        conn,
+        types=None,
+        column="total_energy_kcal",
+        label="Biggest calorie burn (workout)",
+        unit="kcal",
+        round_dp=0,
+    )
+    if biggest_burn is not None:
+        records.append(biggest_burn)
+
+    most_steps = _grouped_daily_pr(
+        conn,
+        metric_type=STEP_COUNT_TYPE,
+        label="Most steps in a day",
+        unit="steps",
+        aggregate="SUM",
+        round_dp=0,
+    )
+    if most_steps is not None:
+        records.append(most_steps)
+
+    highest_active = _grouped_daily_pr(
+        conn,
+        metric_type=ACTIVE_ENERGY_TYPE,
+        label="Highest active energy day",
+        unit="kcal",
+        aggregate="SUM",
+        round_dp=0,
+    )
+    if highest_active is not None:
+        records.append(highest_active)
+
+    sleep_pr = _sleep_pr(conn)
+    if sleep_pr is not None:
+        records.append(sleep_pr)
+
+    highest_hrv = _grouped_daily_pr(
+        conn,
+        metric_type=HRV_TYPE,
+        label="Highest HRV (SDNN)",
+        unit="ms",
+        aggregate="MAX",
+        round_dp=1,
+    )
+    if highest_hrv is not None:
+        records.append(highest_hrv)
+
+    lowest_rhr = _grouped_daily_pr(
+        conn,
+        metric_type=RESTING_HR_TYPE,
+        label="Lowest resting HR",
+        unit="bpm",
+        higher_is_better=False,
+        aggregate="MIN",
+        round_dp=0,
+    )
+    if lowest_rhr is not None:
+        records.append(lowest_rhr)
+
+    # Streaks — anchored at latest_datetime(conn), bounded by `period_days`.
+    latest = latest_datetime(conn)
+    if latest is None:
+        return PersonalRecords(
+            period_days=period_days,
+            records=records,
+            current_streak_days=0,
+            longest_streak_days=0,
+            current_exercise_streak_days=0,
+        )
+    anchor = latest.date()
+    window_start = anchor - timedelta(days=period_days)
+
+    workout_days_window = _workout_days(conn, since=window_start)
+    current_streak = _current_streak(workout_days_window, anchor)
+    longest_streak = _longest_streak(workout_days_window)
+
+    exercise_days_window = _exercise_days(conn, since=window_start)
+    current_exercise_streak = _current_streak(exercise_days_window, anchor)
+
+    return PersonalRecords(
+        period_days=period_days,
+        records=records,
+        current_streak_days=current_streak,
+        longest_streak_days=longest_streak,
+        current_exercise_streak_days=current_exercise_streak,
     )

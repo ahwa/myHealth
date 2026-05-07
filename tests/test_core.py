@@ -792,3 +792,603 @@ def test_json_post_raises_on_http_error():
         import pytest
         with pytest.raises(RuntimeError, match="invalid_grant"):
             _json_post("https://example.com", {"grant_type": "refresh_token"})
+
+
+# --- Personal records & streaks ---
+
+def test_personal_records_includes_longest_workout_from_fixture(tmp_path):
+    from datetime import date
+    from myhealth.analytics import personal_records
+
+    conn = connect(tmp_path / "health.sqlite")
+    insert_items(conn, parse_export(FIXTURE))
+
+    prs = personal_records(conn)
+
+    longest = next((r for r in prs.records if r.metric == "Longest workout"), None)
+    assert longest is not None
+    assert longest.value == 45.0
+    assert longest.unit == "min"
+    assert longest.occurred_on == date(2026, 5, 1)
+    assert longest.higher_is_better is True
+
+
+def test_personal_records_includes_longest_sleep_bucketed_by_wake_date(tmp_path):
+    from datetime import date
+    from myhealth.analytics import personal_records
+
+    # Two nights: 6.5h waking 2026-04-30, 8.0h waking 2026-05-01
+    sleep_segs = [
+        {"type": "HKCategoryTypeIdentifierSleepAnalysis",
+         "start": "2026-04-29 23:00:00 -0700", "end": "2026-04-30 02:00:00 -0700",
+         "value": "HKCategoryValueSleepAnalysisAsleepCore"},
+        {"type": "HKCategoryTypeIdentifierSleepAnalysis",
+         "start": "2026-04-30 02:30:00 -0700", "end": "2026-04-30 06:00:00 -0700",
+         "value": "HKCategoryValueSleepAnalysisAsleepDeep"},
+        {"type": "HKCategoryTypeIdentifierSleepAnalysis",
+         "start": "2026-04-30 22:00:00 -0700", "end": "2026-05-01 06:00:00 -0700",
+         "value": "HKCategoryValueSleepAnalysisAsleepREM"},
+    ]
+    xml = _build_records_xml(sleep_segs, workouts=[
+        {"type": "HKWorkoutActivityTypeWalking",
+         "start": "2026-05-01 12:00:00 -0700", "end": "2026-05-01 12:30:00 -0700",
+         "duration": 30}
+    ])
+    fixture = tmp_path / "sleep.xml"
+    fixture.write_text(xml)
+    conn = connect(":memory:")  # type: ignore[arg-type]
+    insert_items(conn, parse_export(fixture))
+
+    prs = personal_records(conn)
+
+    longest_sleep = next((r for r in prs.records if r.metric == "Longest sleep night"), None)
+    assert longest_sleep is not None
+    assert longest_sleep.value == 8.0
+    assert longest_sleep.unit == "h"
+    assert longest_sleep.occurred_on == date(2026, 5, 1)
+
+
+def test_personal_records_lowest_resting_hr_uses_min_not_max(tmp_path):
+    from datetime import date
+    from myhealth.analytics import personal_records
+
+    conn = connect(tmp_path / "health.sqlite")
+    insert_items(conn, parse_export(FIXTURE))
+
+    prs = personal_records(conn)
+
+    rhr = next((r for r in prs.records if r.metric == "Lowest resting HR"), None)
+    assert rhr is not None
+    assert rhr.value == 55
+    assert rhr.unit == "bpm"
+    assert rhr.occurred_on == date(2026, 5, 1)
+    assert rhr.higher_is_better is False
+
+
+def test_personal_records_most_steps_sums_per_day(tmp_path):
+    from datetime import date
+    from myhealth.analytics import personal_records
+
+    step_records = [
+        {"type": "HKQuantityTypeIdentifierStepCount", "unit": "count",
+         "start": "2026-04-28 07:00:00 -0700", "end": "2026-04-28 07:01:00 -0700", "value": 1000},
+        {"type": "HKQuantityTypeIdentifierStepCount", "unit": "count",
+         "start": "2026-04-28 10:00:00 -0700", "end": "2026-04-28 10:01:00 -0700", "value": 1000},
+        {"type": "HKQuantityTypeIdentifierStepCount", "unit": "count",
+         "start": "2026-04-28 15:00:00 -0700", "end": "2026-04-28 15:01:00 -0700", "value": 1000},
+        {"type": "HKQuantityTypeIdentifierStepCount", "unit": "count",
+         "start": "2026-04-29 09:00:00 -0700", "end": "2026-04-29 09:01:00 -0700", "value": 2500},
+    ]
+    xml = _build_records_xml(step_records)
+    fixture = tmp_path / "steps.xml"
+    fixture.write_text(xml)
+    conn = connect(":memory:")  # type: ignore[arg-type]
+    insert_items(conn, parse_export(fixture))
+
+    prs = personal_records(conn)
+
+    steps_pr = next((r for r in prs.records if r.metric == "Most steps in a day"), None)
+    assert steps_pr is not None
+    assert steps_pr.value == 3000
+    assert steps_pr.unit == "steps"
+    assert steps_pr.occurred_on == date(2026, 4, 28)
+
+
+def test_personal_records_handles_empty_db():
+    from myhealth.analytics import personal_records
+
+    conn = connect(":memory:")  # type: ignore[arg-type]
+    prs = personal_records(conn)
+
+    assert prs.records == []
+    assert prs.current_streak_days == 0
+    assert prs.longest_streak_days == 0
+    assert prs.current_exercise_streak_days == 0
+
+
+def test_personal_records_skips_metrics_not_in_db(tmp_path):
+    from myhealth.analytics import personal_records
+
+    conn = connect(tmp_path / "health.sqlite")
+    insert_items(conn, parse_export(FIXTURE))
+
+    prs = personal_records(conn)
+    metrics = {r.metric for r in prs.records}
+
+    # Not present in the fixture
+    assert "Most steps in a day" not in metrics
+    assert "Highest active energy day" not in metrics
+    assert "Longest walk" not in metrics
+    assert "Longest run" not in metrics
+    # Only the five below should show up
+    assert metrics <= {
+        "Longest workout",
+        "Biggest calorie burn (workout)",
+        "Longest sleep night",
+        "Highest HRV (SDNN)",
+        "Lowest resting HR",
+    }
+
+
+def test_personal_records_current_streak_counts_consecutive_workout_days(tmp_path):
+    from myhealth.analytics import personal_records
+
+    workouts = [
+        {"type": "HKWorkoutActivityTypeWalking",
+         "start": "2026-04-28 08:00:00 -0700", "end": "2026-04-28 08:30:00 -0700",
+         "duration": 30},
+        {"type": "HKWorkoutActivityTypeWalking",
+         "start": "2026-05-01 08:00:00 -0700", "end": "2026-05-01 08:30:00 -0700",
+         "duration": 30},
+        {"type": "HKWorkoutActivityTypeWalking",
+         "start": "2026-05-02 08:00:00 -0700", "end": "2026-05-02 08:30:00 -0700",
+         "duration": 30},
+        {"type": "HKWorkoutActivityTypeWalking",
+         "start": "2026-05-03 08:00:00 -0700", "end": "2026-05-03 08:30:00 -0700",
+         "duration": 30},
+    ]
+    xml = _build_records_xml([], workouts=workouts)
+    fixture = tmp_path / "streak.xml"
+    fixture.write_text(xml)
+    conn = connect(":memory:")  # type: ignore[arg-type]
+    insert_items(conn, parse_export(fixture))
+
+    prs = personal_records(conn, 90)
+
+    assert prs.current_streak_days == 3
+    assert prs.longest_streak_days == 3
+
+
+def test_personal_records_exercise_streak_requires_30_minutes(tmp_path):
+    from myhealth.analytics import personal_records
+
+    # Case 1: latest day sums to 45, prior day sums to 10 -> streak is 1
+    xml = _build_records_xml([
+        {"type": "HKQuantityTypeIdentifierAppleExerciseTime", "unit": "min",
+         "start": "2026-04-30 09:00:00 -0700", "end": "2026-04-30 09:10:00 -0700", "value": 10},
+        {"type": "HKQuantityTypeIdentifierAppleExerciseTime", "unit": "min",
+         "start": "2026-05-01 09:00:00 -0700", "end": "2026-05-01 09:20:00 -0700", "value": 20},
+        {"type": "HKQuantityTypeIdentifierAppleExerciseTime", "unit": "min",
+         "start": "2026-05-01 17:00:00 -0700", "end": "2026-05-01 17:25:00 -0700", "value": 25},
+    ])
+    fixture = tmp_path / "exercise_short.xml"
+    fixture.write_text(xml)
+    conn = connect(":memory:")  # type: ignore[arg-type]
+    insert_items(conn, parse_export(fixture))
+
+    prs = personal_records(conn, 90)
+    assert prs.current_exercise_streak_days == 1
+
+    # Case 2: two consecutive days both >= 30 min
+    xml2 = _build_records_xml([
+        {"type": "HKQuantityTypeIdentifierAppleExerciseTime", "unit": "min",
+         "start": "2026-04-30 09:00:00 -0700", "end": "2026-04-30 09:30:00 -0700", "value": 30},
+        {"type": "HKQuantityTypeIdentifierAppleExerciseTime", "unit": "min",
+         "start": "2026-05-01 09:00:00 -0700", "end": "2026-05-01 09:40:00 -0700", "value": 40},
+    ])
+    fixture2 = tmp_path / "exercise_long.xml"
+    fixture2.write_text(xml2)
+    conn2 = connect(":memory:")  # type: ignore[arg-type]
+    insert_items(conn2, parse_export(fixture2))
+
+    prs2 = personal_records(conn2, 90)
+    assert prs2.current_exercise_streak_days == 2
+
+    # Case 3: metric absent from DB -> 0 (fixture has no ExerciseTime)
+    conn3 = connect(":memory:")  # type: ignore[arg-type]
+    insert_items(conn3, parse_export(FIXTURE))
+    prs3 = personal_records(conn3, 90)
+    assert prs3.current_exercise_streak_days == 0
+
+
+def test_prs_command_prints_personal_records_and_streaks(tmp_path, capsys):
+    from myhealth import cli as cli_mod
+
+    db = tmp_path / "health.sqlite"
+    conn = connect(db)
+    insert_items(conn, parse_export(FIXTURE))
+
+    cli_mod.prs(period="90d", db=db)
+    output = capsys.readouterr().out
+
+    assert "personal records" in output.lower()
+    assert "Streaks" in output
+    assert "Longest workout" in output
+    assert "Lowest resting HR" in output
+
+
+def test_html_report_includes_personal_records_section(tmp_path):
+    from myhealth.reports import write_ai_html_report
+
+    conn = connect(":memory:")  # type: ignore[arg-type]
+    insert_items(conn, parse_export(FIXTURE))
+    summary = summarize(conn, 30)
+    analysis = AIHealthAnalysis(
+        overview="o", key_insights=["i"], recovery_assessment="r",
+        workout_plan=[PlannedDay(day=1, recommendation="x", intensity="low", reason="r")],
+        cautions=[],
+    )
+
+    path = write_ai_html_report(
+        summary, analysis, PlanningStyle.balanced, "gpt-test", tmp_path, db_conn=conn
+    )
+    text = path.read_text()
+
+    assert "Personal records" in text
+    assert "Current workout streak" in text
+    assert "Longest workout" in text
+    assert "Longest streak" in text
+
+
+def test_html_report_without_db_conn_still_renders(tmp_path):
+    from myhealth.reports import write_ai_html_report
+
+    conn = connect(":memory:")  # type: ignore[arg-type]
+    insert_items(conn, parse_export(FIXTURE))
+    summary = summarize(conn, 30)
+    analysis = AIHealthAnalysis(
+        overview="o", key_insights=["i"], recovery_assessment="r",
+        workout_plan=[PlannedDay(day=1, recommendation="x", intensity="low", reason="r")],
+        cautions=[],
+    )
+
+    path = write_ai_html_report(
+        summary, analysis, PlanningStyle.balanced, "gpt-test", tmp_path, db_conn=None
+    )
+    text = path.read_text()
+
+    assert "Personal records" not in text
+
+
+def test_personal_record_date_serializes_as_iso():
+    from datetime import date
+    from myhealth.models import PersonalRecord
+
+    pr = PersonalRecord(metric="x", value=1.0, unit="mi", occurred_on=date(2026, 5, 1))
+    dumped = pr.model_dump(mode="json")
+    assert dumped["occurred_on"] == "2026-05-01"
+
+
+# --- Habit streaks ---
+
+def _build_sleep_xml(nights: list[tuple[str, float]], anchor_date: str = "2026-05-06") -> str:
+    """Build a minimal Apple Health XML with sleep segments.
+
+    nights: list of (wake_date_str, hours) where wake_date_str is e.g. '2026-05-06'
+    Each night is encoded as a single Asleep segment ending at 07:00 on wake_date.
+    """
+    parts = [
+        '<?xml version="1.0" encoding="UTF-8"?>',
+        '<!DOCTYPE HealthData>',
+        '<HealthData locale="en_US">',
+    ]
+    # Add an anchor workout so latest_datetime is deterministic
+    parts.append(
+        f'<Workout workoutActivityType="HKWorkoutActivityTypeWalking" duration="30" '
+        f'durationUnit="min" sourceName="t" '
+        f'startDate="{anchor_date} 08:00:00 -0700" '
+        f'endDate="{anchor_date} 08:30:00 -0700" '
+        f'totalEnergyBurned="100" totalEnergyBurnedUnit="kcal"/>'
+    )
+    for wake_date, hours in nights:
+        # Start time = 07:00 minus hours on the same date (crosses midnight if >7h)
+        from datetime import date as _date, timedelta
+        wake_dt = _date.fromisoformat(wake_date)
+        # encode as a single segment: starts at (wake_date 07:00 - hours)
+        # for simplicity encode as start on wake_date 00:00, end at hours later
+        start_str = f"{wake_date} 00:00:00 -0700"
+        # end = start + hours
+        from datetime import datetime as _dt
+        start = _dt(wake_dt.year, wake_dt.month, wake_dt.day, 0, 0, 0)
+        end = start + timedelta(hours=hours)
+        end_str = end.strftime("%Y-%m-%d %H:%M:%S") + " -0700"
+        parts.append(
+            f'<Record type="HKCategoryTypeIdentifierSleepAnalysis" sourceName="t" unit="" '
+            f'creationDate="{start_str}" startDate="{start_str}" endDate="{end_str}" '
+            f'value="HKCategoryValueSleepAnalysisAsleepCore"/>'
+        )
+    parts.append("</HealthData>")
+    return "\n".join(parts)
+
+
+def _build_rhr_xml(readings: list[tuple[str, float]]) -> str:
+    """Build a minimal XML with RHR records.
+    readings: list of (date_str, value)
+    Includes a workout on the last date as anchor.
+    """
+    parts = [
+        '<?xml version="1.0" encoding="UTF-8"?>',
+        '<!DOCTYPE HealthData>',
+        '<HealthData locale="en_US">',
+    ]
+    for d, v in readings:
+        parts.append(
+            f'<Record type="HKQuantityTypeIdentifierRestingHeartRate" sourceName="t" '
+            f'unit="count/min" creationDate="{d} 08:00:00 -0700" '
+            f'startDate="{d} 08:00:00 -0700" endDate="{d} 08:00:00 -0700" value="{v}"/>'
+        )
+    if readings:
+        last_date = readings[-1][0]
+        parts.append(
+            f'<Workout workoutActivityType="HKWorkoutActivityTypeWalking" duration="30" '
+            f'durationUnit="min" sourceName="t" '
+            f'startDate="{last_date} 10:00:00 -0700" '
+            f'endDate="{last_date} 10:30:00 -0700" '
+            f'totalEnergyBurned="100" totalEnergyBurnedUnit="kcal"/>'
+        )
+    parts.append("</HealthData>")
+    return "\n".join(parts)
+
+
+def _build_steps_xml(readings: list[tuple[str, float]]) -> str:
+    """Build a minimal XML with step records. readings: list of (date_str, value)"""
+    parts = [
+        '<?xml version="1.0" encoding="UTF-8"?>',
+        '<!DOCTYPE HealthData>',
+        '<HealthData locale="en_US">',
+    ]
+    for d, v in readings:
+        parts.append(
+            f'<Record type="HKQuantityTypeIdentifierStepCount" sourceName="t" '
+            f'unit="count" creationDate="{d} 09:00:00 -0700" '
+            f'startDate="{d} 09:00:00 -0700" endDate="{d} 09:01:00 -0700" value="{v}"/>'
+        )
+    if readings:
+        last_date = readings[-1][0]
+        parts.append(
+            f'<Workout workoutActivityType="HKWorkoutActivityTypeWalking" duration="30" '
+            f'durationUnit="min" sourceName="t" '
+            f'startDate="{last_date} 10:00:00 -0700" '
+            f'endDate="{last_date} 10:30:00 -0700" '
+            f'totalEnergyBurned="100" totalEnergyBurnedUnit="kcal"/>'
+        )
+    parts.append("</HealthData>")
+    return "\n".join(parts)
+
+
+def test_compute_streaks_empty_db_returns_empty():
+    """Empty DB: anchor_date is None and streaks is an empty list."""
+    from myhealth.analytics import compute_streaks
+
+    conn = connect(":memory:")  # type: ignore[arg-type]
+    result = compute_streaks(conn, period_days=30)
+
+    assert result.anchor_date is None
+    assert result.streaks == []
+
+
+def test_compute_streaks_three_consecutive_sleep_days(tmp_path):
+    """3 nights of 7.5 h sleep -> current_streak==3, longest_streak==3, active_today==True."""
+    from myhealth.analytics import compute_streaks
+
+    nights = [
+        ("2026-05-04", 7.5),
+        ("2026-05-05", 7.5),
+        ("2026-05-06", 7.5),
+    ]
+    xml = _build_sleep_xml(nights, anchor_date="2026-05-06")
+    fixture = tmp_path / "sleep3.xml"
+    fixture.write_text(xml)
+    conn = connect(":memory:")  # type: ignore[arg-type]
+    insert_items(conn, parse_export(fixture))
+
+    result = compute_streaks(conn, period_days=30)
+
+    sleep_streak = next(s for s in result.streaks if s.metric == "sleep_hours")
+    assert sleep_streak.current_streak == 3
+    assert sleep_streak.longest_streak == 3
+    assert sleep_streak.active_today is True
+
+
+def test_compute_streaks_broken_streak_resets_current(tmp_path):
+    """Pattern [7.5, 6.0, 7.5, 7.5, 7.5]: current_streak==3, longest_streak==3."""
+    from myhealth.analytics import compute_streaks
+
+    nights = [
+        ("2026-05-02", 7.5),
+        ("2026-05-03", 6.0),  # breaks default >= 7.0
+        ("2026-05-04", 7.5),
+        ("2026-05-05", 7.5),
+        ("2026-05-06", 7.5),
+    ]
+    xml = _build_sleep_xml(nights, anchor_date="2026-05-06")
+    fixture = tmp_path / "sleep_broken.xml"
+    fixture.write_text(xml)
+    conn = connect(":memory:")  # type: ignore[arg-type]
+    insert_items(conn, parse_export(fixture))
+
+    result = compute_streaks(conn, period_days=30)
+
+    sleep_streak = next(s for s in result.streaks if s.metric == "sleep_hours")
+    assert sleep_streak.current_streak == 3
+    assert sleep_streak.longest_streak == 3
+
+
+def test_compute_streaks_rhr_uses_lower_is_better(tmp_path):
+    """RHR [58, 55, 72] with default <=60: current_streak==0, longest_streak==2."""
+    from myhealth.analytics import compute_streaks
+
+    readings = [
+        ("2026-05-04", 58.0),
+        ("2026-05-05", 55.0),
+        ("2026-05-06", 72.0),
+    ]
+    xml = _build_rhr_xml(readings)
+    fixture = tmp_path / "rhr.xml"
+    fixture.write_text(xml)
+    conn = connect(":memory:")  # type: ignore[arg-type]
+    insert_items(conn, parse_export(fixture))
+
+    result = compute_streaks(conn, period_days=30)
+
+    rhr_streak = next(s for s in result.streaks if s.metric == "rhr")
+    assert rhr_streak.current_streak == 0
+    assert rhr_streak.longest_streak == 2
+
+
+def test_compute_streaks_steps_sum_per_day(tmp_path):
+    """Two step records on anchor day totalling 9000 + prior day 8500: current_streak==2."""
+    from myhealth.analytics import compute_streaks
+
+    readings = [
+        ("2026-05-05", 8500.0),  # prior day
+        ("2026-05-06", 5000.0),  # anchor day record 1
+        ("2026-05-06", 4000.0),  # anchor day record 2 -> total 9000
+    ]
+    xml = _build_steps_xml(readings)
+    fixture = tmp_path / "steps2.xml"
+    fixture.write_text(xml)
+    conn = connect(":memory:")  # type: ignore[arg-type]
+    insert_items(conn, parse_export(fixture))
+
+    result = compute_streaks(conn, period_days=30)
+
+    steps_streak = next(s for s in result.streaks if s.metric == "steps")
+    assert steps_streak.current_streak == 2
+
+
+def test_compute_streaks_missing_day_breaks_streak(tmp_path):
+    """Days 1,2 have 7.5h sleep; anchor has no sleep -> current==0, longest==2, active_today==False."""
+    from myhealth.analytics import compute_streaks
+
+    nights = [
+        ("2026-05-04", 7.5),
+        ("2026-05-05", 7.5),
+        # 2026-05-06 (anchor) has no sleep record
+    ]
+    xml = _build_sleep_xml(nights, anchor_date="2026-05-06")
+    fixture = tmp_path / "sleep_missing.xml"
+    fixture.write_text(xml)
+    conn = connect(":memory:")  # type: ignore[arg-type]
+    insert_items(conn, parse_export(fixture))
+
+    result = compute_streaks(conn, period_days=30)
+
+    sleep_streak = next(s for s in result.streaks if s.metric == "sleep_hours")
+    assert sleep_streak.current_streak == 0
+    assert sleep_streak.longest_streak == 2
+    assert sleep_streak.active_today is False
+
+
+def test_compute_streaks_override_raises_threshold(tmp_path):
+    """3 days 7.5h sleep with threshold overridden to 8.0: current_streak==0."""
+    from myhealth.analytics import compute_streaks
+
+    nights = [
+        ("2026-05-04", 7.5),
+        ("2026-05-05", 7.5),
+        ("2026-05-06", 7.5),
+    ]
+    xml = _build_sleep_xml(nights, anchor_date="2026-05-06")
+    fixture = tmp_path / "sleep_override.xml"
+    fixture.write_text(xml)
+    conn = connect(":memory:")  # type: ignore[arg-type]
+    insert_items(conn, parse_export(fixture))
+
+    result = compute_streaks(conn, period_days=30, thresholds={"sleep_hours": 8.0})
+
+    sleep_streak = next(s for s in result.streaks if s.metric == "sleep_hours")
+    assert sleep_streak.current_streak == 0
+
+
+def test_compute_streaks_unknown_threshold_key_ignored(tmp_path):
+    """Unknown key in thresholds dict is silently ignored; no 'bogus' metric in streaks."""
+    from myhealth.analytics import compute_streaks
+
+    nights = [("2026-05-06", 7.5)]
+    xml = _build_sleep_xml(nights, anchor_date="2026-05-06")
+    fixture = tmp_path / "sleep_bogus.xml"
+    fixture.write_text(xml)
+    conn = connect(":memory:")  # type: ignore[arg-type]
+    insert_items(conn, parse_export(fixture))
+
+    result = compute_streaks(conn, period_days=30, thresholds={"bogus": 99.0})
+
+    metric_names = [s.metric for s in result.streaks]
+    assert "bogus" not in metric_names
+    # Should still return normally with the five standard metrics
+    assert len(result.streaks) == 5
+
+
+def test_compute_streaks_returns_all_five_metrics_in_order():
+    """Streaks list always has exactly five metrics in canonical order."""
+    from myhealth.analytics import compute_streaks
+
+    conn = connect(":memory:")  # type: ignore[arg-type]
+    insert_items(conn, parse_export(FIXTURE))
+
+    result = compute_streaks(conn, period_days=30)
+
+    assert [s.metric for s in result.streaks] == [
+        "sleep_hours", "steps", "hrv_ms", "active_calories", "rhr"
+    ]
+
+
+def test_streaks_cli_runs_offline(tmp_path):
+    """myhealth streaks --db ... --period 30d exits 0 and prints Sleep and Steps."""
+    from typer.testing import CliRunner
+    from myhealth.cli import app
+
+    db = tmp_path / "health.sqlite"
+    conn = connect(db)
+    insert_items(conn, parse_export(FIXTURE))
+    conn.close()
+
+    runner = CliRunner()
+    result = runner.invoke(app, ["streaks", "--db", str(db), "--period", "30d"])
+
+    assert result.exit_code == 0, f"Non-zero exit: {result.output}"
+    assert "Sleep" in result.output
+    assert "Steps" in result.output
+
+
+def test_streaks_cli_goal_override_parses(tmp_path):
+    """--goal sleep=8 --goal steps=10000 are parsed and passed through without error."""
+    from typer.testing import CliRunner
+    from myhealth.cli import app
+
+    db = tmp_path / "health.sqlite"
+    conn = connect(db)
+    insert_items(conn, parse_export(FIXTURE))
+    conn.close()
+
+    runner = CliRunner()
+    result = runner.invoke(
+        app,
+        ["streaks", "--goal", "sleep=8", "--goal", "steps=10000", "--db", str(db)],
+    )
+
+    assert result.exit_code == 0, f"Non-zero exit: {result.output}"
+
+
+def test_streaks_cli_bad_goal_reports_error(tmp_path):
+    """--goal sleep (missing '=') should produce a non-zero exit code."""
+    from typer.testing import CliRunner
+    from myhealth.cli import app
+
+    db = tmp_path / "health.sqlite"
+
+    runner = CliRunner()
+    result = runner.invoke(app, ["streaks", "--goal", "sleep", "--db", str(db)])
+
+    assert result.exit_code != 0
